@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="mx.itesm.javier.finalfantasychat" >
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme" >
+        <activity
+            android:name=".MainChat"
+            android:label="@string/app_name" >
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".ChangeHero"
+            android:label="@string/title_activity_change_hero" >
+        </activity>
+        <activity
+            android:name=".HeroStats"
+            android:label="@string/title_activity_hero_stats" >
+        </activity>
+        <activity
+            android:name=".SelectArea"
+            android:label="@string/title_activity_select_area" >
+        </activity>
+        <activity
+            android:name=".MonsterStats"
+            android:label="@string/title_activity_monster_stats" >
+        </activity>
+    </application>
+
+</manifest>

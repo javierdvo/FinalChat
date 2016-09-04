@@ -1,0 +1,1549 @@
+// FF chat
+//Javier De Velasco Oriol
+//ITESM Qro - Hallym
+
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <time.h>
+#include <mysql.h>
+#define MAXDATASIZE 1000
+#define BACKLOG 10
+#define MAXUSERS 20
+#define MAXIDSIZE 40
+
+//Conection structure for mysql database
+struct connection_details{
+        char server[80];
+        char user[80];
+        char password[80];
+        char database[80];
+};
+
+//Structure for hero stats
+struct hero{
+        char name[20];
+        int level;
+        int maxHealth;
+        int currentHealth;
+        int maxMana;
+        int currentMana;
+        int attack;
+        int magic;
+        int skill;
+        int defense;
+        int mdefense;
+        int exp;
+};
+
+//mysql setup
+MYSQL* mysql_connection_setup(struct connection_details mysql_details){
+
+        MYSQL *connection = mysql_init(NULL);
+        if(!mysql_real_connect(connection,mysql_details.server, mysql_details.user,mysql_details.password,mysql_details.database,0,NULL,0)){
+                printf("Connection error: %s\n",mysql_error(connection));
+                exit(1);
+        }
+        return connection;
+}
+
+MYSQL_RES* mysql_perform_query(MYSQL *connection, char *sql_query){
+        if(mysql_query(connection,sql_query)){
+                printf("MySQL querry error %s\n", mysql_error(connection));
+                exit(1);
+        }
+        return mysql_use_result(connection);
+}
+
+//damage calculator function
+int damageCalc(int targetdef,int targetmdef,int sourceAttack, int sourceMagic, int type,int weak,int strong,int element,int levelSource){
+        int damage=0;
+        if (type==0){
+                if(element==0){
+                        damage=((10+(((40+sourceAttack)*levelSource*levelSource)/1000)*(1000-targetdef)/1000));
+                }
+                else{
+                        if(element==weak){
+                                damage=2*((10+(((40+sourceAttack)*levelSource*levelSource)/1000)*(1000-targetdef)/1000));
+                        }
+                        else if(element==strong){
+                                damage=((10+(((40+sourceAttack)*levelSource*levelSource)/2000)*(1000-targetdef)/1000));
+                        }
+                        else{
+                                 damage=((10+(((40+sourceAttack)*levelSource*levelSource)/1000)*(1000-targetdef)/1000));
+                        }
+                }
+        }
+        else
+        {
+         if(element==0){
+                        damage=((10+(((40+sourceMagic)*levelSource*levelSource)/1000)*(1000-targetmdef)/1000));
+                }
+                else{
+                        if(element==weak){
+                                damage=2*((10+(((40+sourceMagic)*levelSource*levelSource)/1000)*(1000-targetmdef)/1000));
+                        }
+                        else if(element==strong){
+                                damage=((10+(((40+sourceMagic)*levelSource*levelSource)/2000)*(1000-targetmdef)/1000));
+                        }
+                        else{
+                                 damage=((10+(((40+sourceMagic)*levelSource*levelSource)/1000)*(1000-targetmdef)/1000));
+                        }
+                }
+
+        }
+        return damage;
+}
+
+int levelAverage(struct hero heroes[MAXUSERS],int userNumber){
+        int average=0;
+        int i =0;
+        for(i=0;i<(userNumber-1);i++){
+                average=average+ heroes[i+5].level;}
+        average=average/(userNumber-1);
+        return average;
+        }
+//main
+int main(int argc, char* argv[]) {
+
+        MYSQL *conn;
+        MYSQL_RES *res;
+        MYSQL_ROW row;
+        char query_string[2000];
+
+        //hero data variables
+        struct hero heroes[MAXUSERS];
+        int heroesBaseMana[MAXUSERS];
+        int heroesBaseHealth[MAXUSERS];
+
+        //conection initialization
+        struct connection_details cd;
+        strcpy(cd.server, "localhost");
+        strcpy(cd.user, "networkclass");
+        strcpy(cd.password, "network");
+        strcpy(cd.database, "Rover");
+
+        conn = mysql_connection_setup(cd);
+
+        int sockfd, newfd;
+        struct addrinfo hints, *servinfo;
+        struct sockaddr_storage their_addr;
+        socklen_t sin_size;
+        char s[INET_ADDRSTRLEN];
+        int yes = 1;
+        int rv;
+
+        // for select()
+        fd_set master;
+        fd_set read_fds;
+        int fdmax;
+
+        // for id stufferino
+        char userid[MAXUSERS][MAXIDSIZE];
+        int usernum=1;
+
+        char place[20];
+        char reqString[40];
+        int battlemode = 0;       // OFF
+
+        //random
+        srand(time(NULL));
+
+        //monster stats
+        char monsterName[200];
+        char monsterStats[1000];
+        char heroStats[1000];
+        int monsterLevel;
+        int monsterHealth;
+        int monsterMage;
+        int monsterAttack;
+        int monsterMagic;
+        int monsterSkill;
+        int monsterDefense;
+        int monsterMdefense;
+        int monsterStrength;
+        int monsterWeakness;
+        int monsterExp;
+        int combatEnded;
+        int randomMove;
+        int rH;
+        int allDead;
+        int isHeal;
+        int updateHero;
+        int updateMonster;
+        //turn variables
+        int userturn[MAXUSERS];
+        int userdead[MAXUSERS];
+        char abilityName[30];
+        int damageDealt;
+        char abilityResult[200];
+
+
+        char buf[MAXDATASIZE],tmpbuf[MAXDATASIZE],msg[MAXDATASIZE],tmpbuf2[MAXDATASIZE];
+        int numbytes;
+
+        if(argc != 2) {
+                printf("usage: server portnum\n");
+                exit(1);
+        }
+
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_PASSIVE;    // use my IP
+
+        if((rv = getaddrinfo(NULL, argv[1], &hints, &servinfo)) != 0) {
+                fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+                exit(1);
+        }
+
+        if((sockfd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) == -1) {
+                perror("server: socket");
+                exit(1);
+        }
+
+        // this line
+        setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+
+        if(bind(sockfd, servinfo->ai_addr, servinfo->ai_addrlen) == -1) {
+                close(sockfd);
+                perror("server: bind");
+                exit(1);
+        }
+
+        freeaddrinfo(servinfo);
+
+        if(listen(sockfd, BACKLOG) == -1) {
+                perror("listen");
+                exit(1);
+        }
+
+        FD_ZERO(&master);
+        FD_SET(0, &master);
+        FD_SET(sockfd, &master);
+        fdmax = sockfd;
+
+        while(1) {
+                read_fds = master;
+                if(select(fdmax+1, &read_fds, NULL, NULL, NULL) == -1) {
+                        perror("select");
+                        exit(1);
+                }
+
+                for(int i=0; i<=fdmax; i++) {
+                        if(FD_ISSET(i, &read_fds)) {
+                                if(i == sockfd) {
+                                        // A new user has joined.
+                                        sin_size = sizeof their_addr;
+                                        newfd = accept(sockfd, (struct sockaddr*)&their_addr, &sin_size);
+
+                                        if(newfd == -1) {
+                                                perror("accept");
+                                        } else {
+                                                FD_SET(newfd, &master);
+                                                if(newfd > fdmax) {
+                                                        fdmax = newfd;
+                                                }
+                                                printf("chatserver: new connection from %s on socket %d\n",
+                                                        inet_ntop(their_addr.ss_family, &((struct sockaddr_in*)&their_addr)->sin_addr, s, sizeof s), newfd);
+
+                                                sprintf(userid[newfd],"user%02d",usernum);
+                                                usernum++;
+
+                                                sprintf(buf,"Choose a character!:%i:",usernum+3);
+                                                if(send(newfd,buf,strlen(buf),0) == -1){
+                                                        perror("send");
+                                                }
+                                        }
+                                }
+                                else if(i == 0) {
+                                        fgets(buf, sizeof(buf), stdin);
+
+                                        for(int j=3; j<=fdmax; j++) {
+                                                if(j==sockfd) continue;
+                                                if(!FD_ISSET(j, &master)) continue;
+                                                if(send(j, buf, strlen(buf), 0) == -1) {
+                                                        perror("send");
+                                                }
+                                        }
+                                }
+                                else {
+                                        if((numbytes = recv(i, buf, sizeof buf, 0)) <= 0) {
+                                                if(numbytes == 0) {
+                                                        printf("chatserver: socket %d hung up\n", i);
+                                                        usernum--;
+                                                } else {
+                                                        perror("recv");
+                                                }
+                                                close(i);
+                                                FD_CLR(i, &master);
+                                        }
+                                        else {
+                                                buf[numbytes] = '\0';
+                                                strcpy(msg,buf);
+                                                printf("server received \"%s\" from %s.\n", buf, userid[i]);
+                                                //change hero and saves stats to the hero id
+                                                if(strncasecmp(buf, "/id", 3) ==0){
+                                                        strcpy(tmpbuf,userid[i]);
+                                                        strcpy(userid[i],buf+4);
+                                                        sprintf(buf,"Changed hero to %s", userid[i]);
+                                                        if(send(i,buf,strlen(buf),0)== -1)perror("send");
+                                                        sprintf(buf, "%s changed Character to %s",tmpbuf,userid[i]);
+                                                        sprintf(query_string, "select * from cosmonauts WHERE name= \"%s\"",userid[i]);
+                                                        res=mysql_perform_query(conn,query_string);
+                                                        row=mysql_fetch_row(res);
+                                                        strcpy(heroes[i].name,row[0]);
+                                                        heroes[i].level= atoi(row[1]);
+                                                        heroesBaseHealth[i]=atoi(row[2]);
+                                                        heroes[i].maxHealth=50+ ((40+heroesBaseHealth[i])*heroes[i].level*heroes[i].level)/60;
+                                                        heroes[i].currentHealth=heroes[i].maxHealth;
+                                                        heroesBaseMana[i]= atoi(row[3]);
+                                                        heroes[i].maxMana= 10+((heroesBaseMana[i]*heroes[i].level)/5);
+                                                        heroes[i].attack= atoi(row[4]);
+                                                        heroes[i].currentMana=heroes[i].maxMana;
+                                                        heroes[i].magic= atoi(row[5]);
+                                                        heroes[i].skill= atoi(row[6]);
+                                                        heroes[i].defense= atoi(row[7])*10;
+                                                        heroes[i].mdefense= atoi(row[8])*10;
+                                                        heroes[i].exp=atoi(row[9]);
+                                                        sprintf(heroStats,"/herodata\nuser:%i:\nHero:%s:\nLevel:%i:\nMaxHp:%i:\ncurrentHp:%i:\nMaxMana:%i:\ncurrentMana:%i:,Attack:%i:\nMagic:%i:\nSkill:%i:\nDefense:%i:\nMdefense:%i:\nExp:%i:\n",i, heroes[i].name,heroes[i].level,heroes[i].maxHealth,heroes[i].currentHealth,heroes[i].maxMana,heroes[i].currentMana,heroes[i].attack,heroes[i].magic,heroes[i].skill,heroes[i].defense,heroes[i].mdefense,heroes[i].exp);
+                                                        mysql_free_result(res);
+                                                        strcpy(buf,heroStats);
+                                                        if(send(i, buf, strlen(buf), 0)==-1) perror ("send");
+
+                                                }
+                                                //battle start comand gets a random enemy from that zone
+                                                else if(strstr(buf, "/battle") != NULL) {
+                                                        strcpy(tmpbuf, buf);
+                                                        sprintf(buf, "%s: %s\n", userid[i],tmpbuf);
+                                                        if(battlemode == 0) battlemode = 1;
+                                                        if(strstr(tmpbuf,"/Mountain")!=NULL){
+                                                                 sprintf(reqString, "select * from lunarians WHERE region=\"Mountain\" ORDER BY rand() LIMIT 1");
+                                                        }
+                                                        else if(strstr(buf,"/Ocean")!=NULL){
+                                                                 sprintf(reqString, "select * from lunarians WHERE region=\"Ocean\" ORDER BY rand() LIMIT 1");
+                                                        }
+                                                        else if(strstr(buf,"/Forest")!=NULL){
+                                                                 sprintf(reqString, "select * from lunarians WHERE region=\"Forest\" ORDER BY rand() LIMIT 1");
+                                                        }
+                                                        else if(strstr(buf,"/Desert")!=NULL){
+                                                                sprintf(reqString, "select * from lunarians WHERE region=\"Desert\" ORDER BY rand() LIMIT 1");
+                                                        }
+                                                        else{
+                                                                 sprintf(reqString, "select * from lunarians ORDER BY rand() LIMIT 1");
+                                                        }
+
+
+                                                }
+                                                //normal chat
+                                                else{
+                                                        strcpy(tmpbuf, buf);
+                                                        sprintf(buf, "%s: %s",userid[i],tmpbuf);
+                                                }
+                                                //normal chat
+                                                if(battlemode==0){
+                                                        for(int j=3; j<=fdmax; j++) {
+                                                                if(j==sockfd) continue;
+                                                                if(j==i) continue;
+                                                                if(!FD_ISSET(j, &master)) continue;
+                                                                if(send(j, buf, strlen(buf), 0) == -1) {
+                                                                        perror("send");
+                                                                }
+                                                        }
+                                                }
+                                                //copies stats to variables and sends data to users
+                                                if(battlemode == 1) {
+                                                        //selects a random enemy based on terrain
+                                                        strcpy(query_string,reqString);
+                                                        res=mysql_perform_query(conn,query_string);
+                                                        row=mysql_fetch_row(res);
+                                                        strcpy(monsterName,row[0]);
+                                                        monsterLevel=levelAverage(heroes,usernum);
+                                                        monsterHealth=atoi(row[1]);
+                                                        monsterHealth=50+(((40+monsterHealth)*monsterLevel*monsterLevel)/60);
+                                                        monsterMage=atoi(row[2]);
+                                                        monsterAttack=atoi(row[3]);
+                                                        monsterMagic=atoi(row[4]);
+                                                        monsterSkill=atoi(row[5]);
+                                                        monsterDefense=atoi(row[6]);
+                                                        monsterMdefense=atoi(row[7]);
+                                                        monsterStrength=atoi(row[8]);
+                                                        monsterWeakness=atoi(row[9]);
+                                                        monsterExp=atoi(row[10]);
+                                                        sprintf(monsterStats,"/startbattle\n/monsterdata\nName:%s:\nLevel:%i:\nHealth:%i:\nMage:%i:\nAttack:%i:\nMagic:%i:\nSkill:%i:\nDefense:%i:\nMagic defense:%i:\nStrengths:%i:\nWeakness:%i:\nExp:%i:\n/end\n",monsterName,monsterLevel,monsterHealth,monsterMage,monsterAttack,monsterMagic,monsterSkill,monsterDefense,monsterMdefense,monsterStrength,monsterWeakness,monsterExp);
+                                                        strcpy(buf,monsterStats);
+                                                        mysql_free_result(res);
+
+                                                        for(int j=3; j<=fdmax; j++) {
+                                                                if(j == sockfd) continue;
+                                                                if(!FD_ISSET(j, &master)) continue;
+                                                                if(send(j, buf, strlen(buf), 0) ==-1)perror("send");
+                                                        }
+
+                                                        battlemode = 2;
+
+                                                }
+                                                //hero turn
+
+                                                else if(battlemode == 2) {
+                                                        int msgSend=0;
+                                                        int updateHero=0;
+                                                        int updateMonster=0;
+                                                        if(userdead[i]==1){
+                                                                userturn[i]=1;
+                                                        }
+                                                        if(userturn[i]==0){
+                                                                if(strstr(tmpbuf,"sword")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(strstr(tmpbuf,"fire")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,1,heroes[i].level);
+                                                                                                strcpy(abilityName, "Fire Sword");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                 sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                        else if(strstr(tmpbuf,"ice")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,3,heroes[i].level);
+                                                                                                strcpy(abilityName, "Ice Sword");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                 sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                        else if(strstr(tmpbuf,"thunder")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,2,heroes[i].level);
+                                                                                                strcpy(abilityName, "Thunder Sword");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                 sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                        else{
+                                                                                if(heroes[i].skill>9){
+
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Sword attack");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+
+
+                                                                }
+                                                                else if(strstr(tmpbuf,"axe")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(strstr(tmpbuf,"fire")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,1,heroes[i].level);
+                                                                                                strcpy(abilityName, "Fire Axe");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                 sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                        else if(strstr(tmpbuf,"ice")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,3,heroes[i].level);
+                                                                                                strcpy(abilityName, "Ice Axe");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                 sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                        else if(strstr(tmpbuf,"thunder")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,2,heroes[i].level);
+                                                                                                strcpy(abilityName, "Thunder Axe");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                 sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+
+                                                                        else{
+                                                                                if(heroes[i].skill>9){
+
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Axe attack");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+
+                                                                }
+                                                                else if(strstr(tmpbuf,"spear")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(strstr(tmpbuf,"fire")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,1,heroes[i].level);
+                                                                                                strcpy(abilityName, "Fire Spear");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                        else if(strstr(tmpbuf,"ice")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,3,heroes[i].level);
+                                                                                                strcpy(abilityName, "Ice Spear");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                 sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                        else if(strstr(tmpbuf,"thunder")!=NULL){
+                                                                                if(heroes[i].skill>16){
+                                                                                        if(heroes[i].currentMana>29){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-30;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,2,heroes[i].level);
+                                                                                                strcpy(abilityName, "Thunder Spear");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                        }
+                                                                                        else {
+                                                                                                 sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                                        }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                        else{
+                                                                                if(heroes[i].skill>9){
+
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Spear attack");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+
+
+                                                                }
+                                                                else if(strstr(tmpbuf,"pierce")!=NULL){
+                                                                        msgSend=1;
+                                                                                if(heroes[i].skill>11){
+                                                                                                damageDealt=damageCalc(monsterDefense/5,monsterMdefense,heroes[i].attack*10,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Pierce Attack");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                else if(strstr(tmpbuf,"thrust")!=NULL){
+                                                                        msgSend=1;
+                                                                                if(heroes[i].skill>11){
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*13,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Thrust Attack");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                else if(strstr(tmpbuf,"jump")!=NULL){
+                                                                                msgSend=1;
+                                                                                if(heroes[i].skill>21){
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*17,heroes[i].magic*10,0,monsterWeakness,monsterStrength,1,heroes[i].level);
+                                                                                                strcpy(abilityName,"Jump");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                else if(strstr(tmpbuf,"cyclone")!=NULL){
+                                                                        msgSend=1;
+                                                                                if(heroes[i].skill>19){
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*15,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Cyclone");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                else if(strstr(tmpbuf,"xstrike")!=NULL){
+                                                                        msgSend=1;
+                                                                                if(heroes[i].skill>24){
+                                                                                                damageDealt=damageCalc(monsterDefense/2,monsterMdefense,heroes[i].attack*17,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "X Strike");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                else if(strstr(tmpbuf,"zansetsuken")!=NULL){
+                                                                                msgSend=1;
+                                                                                if(heroes[i].skill>29){
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack*20,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Zansetsuken");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s Skill level is too low\n",heroes[i].name);
+                                                                                }
+                                                                        }
+                                                                else if(strstr(tmpbuf,"attack")!=NULL){
+                                                                        msgSend=1;
+
+                                                                                                damageDealt=damageCalc(monsterDefense/2,monsterMdefense,heroes[i].attack*7,heroes[i].magic*10,0,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Basic Attack");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+
+
+                                                                        }
+                                                                else if(strstr(tmpbuf,"fire")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>7){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-8;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*8,1,monsterWeakness,monsterStrength,1,heroes[i].level);
+                                                                                                strcpy(abilityName, "Fire");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+
+                                                                else if(strstr(tmpbuf,"thunder")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>7){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-8;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*8,1,monsterWeakness,monsterStrength,2,heroes[i].level);
+                                                                                                strcpy(abilityName, "Thunder");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+                                                                else if(strstr(tmpbuf,"blizzard")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>7){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-8;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*8,1,monsterWeakness,monsterStrength,3,heroes[i].level);
+                                                                                                strcpy(abilityName, "Blizzard");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+                                                                else if(strstr(tmpbuf,"fira")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>21){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-22;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*13,1,monsterWeakness,monsterStrength,1,heroes[i].level);
+                                                                                                strcpy(abilityName, "Fira");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+
+                                                                else if(strstr(tmpbuf,"thundara")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>21){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-22;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*13,1,monsterWeakness,monsterStrength,2,heroes[i].level);
+                                                                                                strcpy(abilityName, "Thundara");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+                                                                else if(strstr(tmpbuf,"blizzara")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>21){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-22;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*13,1,monsterWeakness,monsterStrength,3,heroes[i].level);
+                                                                                                strcpy(abilityName, "Blizzara");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+                                                                else if(strstr(tmpbuf,"flare")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>39){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-40;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*20,1,monsterWeakness,monsterStrength,1,heroes[i].level);
+                                                                                                strcpy(abilityName, "Flare");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+
+                                                                else if(strstr(tmpbuf,"luminaire")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>39){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-40;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*20,1,monsterWeakness,monsterStrength,2,heroes[i].level);
+                                                                                                strcpy(abilityName, "Luminaire");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+                                                                else if(strstr(tmpbuf,"maelstrom")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>39){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-40;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*20,1,monsterWeakness,monsterStrength,3,heroes[i].level);
+                                                                                                strcpy(abilityName, "Maelstrom");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+
+                                                                else if(strstr(tmpbuf,"meteor")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>44){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-45;
+                                                                                                damageDealt=damageCalc(monsterDefense,1,heroes[i].attack,heroes[i].magic*30,1,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Meteor");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                               }
+                                                                }
+
+                                                                else if(strstr(tmpbuf,"ultima")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>49){
+                                                                                                heroes[i].currentMana=heroes[i].currentMana-50;
+                                                                                                damageDealt=damageCalc(monsterDefense,monsterMdefense,heroes[i].attack,heroes[i].magic*50,1,monsterWeakness,monsterStrength,0,heroes[i].level);
+                                                                                                strcpy(abilityName, "Ultima");
+                                                                                                if(monsterHealth<=damageDealt){
+                                                                                                        monsterHealth=0;
+                                                                                                        battlemode=4;
+                                                                                                        sprintf(buf,"%s used %s and defeated %s\n",heroes[i].name,abilityName,monsterName);
+                                                                                                }
+                                                                                                else{
+                                                                                                        userturn[i]=1;
+                                                                                                        monsterHealth=monsterHealth-damageDealt;
+                                                                                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",heroes[i].name,abilityName,damageDealt,monsterName);
+
+                                                                                                }
+                                                                                }
+                                                                                else {
+                                                                                        sprintf(buf, "%s is low on Mana!",heroes[i].name);
+                                                                               }
+                                                                }
+
+
+                                                                else if(strstr(tmpbuf,"cure")!=NULL){
+                                                                        msgSend=1;
+                                                                        if(heroes[i].currentMana>9){
+                                                                        heroes[i].currentMana=heroes[i].currentMana-10;
+                                                                        damageDealt=damageCalc(1,1,heroes[i].attack,heroes[i].magic*10,1,0,0,0,heroes[i].level);
+                                                                        strcpy(abilityName,"Cure");
+                                                                        userturn[i]=1;
+                                                                        heroes[i].currentHealth=heroes[i].currentHealth+damageDealt;
+                                                                        if(heroes[i].currentHealth>heroes[i].maxHealth){
+                                                                                heroes[i].currentHealth=heroes[i].maxHealth;
+                                                                        }
+                                                                        sprintf(buf,"%s used %s to cure itself for %i damage\n",heroes[i].name,abilityName,damageDealt);
+                                                                        }else{
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                                }
+
+                                                                }
+                                                                else if(strstr(tmpbuf,"cura")!=NULL){
+                                                                msgSend=1;
+                                                                if(heroes[i].currentMana>24){
+                                                                        heroes[i].currentMana=heroes[i].currentMana-25;
+                                                                        damageDealt=damageCalc(1,1,heroes[i].attack,heroes[i].magic*20,1,0,0,0,heroes[i].level);
+                                                                        strcpy(abilityName,"Cura");
+                                                                        userturn[i]=1;
+                                                                        heroes[i].currentHealth=heroes[i].currentHealth+damageDealt;
+                                                                        if(heroes[i].currentHealth>heroes[i].maxHealth){
+                                                                                heroes[i].currentHealth=heroes[i].maxHealth;
+                                                                        }
+                                                                        sprintf(buf,"%s used %s to cure itself for %i damage\n",heroes[i].name,abilityName,damageDealt);
+
+                                                                        }else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                                }
+
+                                                                }
+                                                                else if(strstr(tmpbuf,"curaja")!=NULL){
+                                                                msgSend=1;
+                                                                if(heroes[i].currentMana>39){
+                                                                        heroes[i].currentMana=heroes[i].currentMana-40;
+                                                                        damageDealt=damageCalc(1,1,heroes[i].attack,heroes[i].magic*30,1,0,0,0,heroes[i].level);
+                                                                        strcpy(abilityName,"Curaja");
+                                                                        userturn[i]=1;
+                                                                        heroes[i].currentHealth=heroes[i].currentHealth+damageDealt;
+                                                                        if(heroes[i].currentHealth>heroes[i].maxHealth){
+                                                                                heroes[i].currentHealth=heroes[i].maxHealth;
+                                                                        }
+                                                                        sprintf(buf,"%s used %s to cure itself for %i damage\n",heroes[i].name,abilityName,damageDealt);
+
+                                                                        }else {
+                                                                                        sprintf(buf, "%s is low on Mana!\n",heroes[i].name);
+                                                                        }
+
+                                                                }
+                                                                else{
+                                                                        msgSend=0;
+                                                                }
+
+
+                                                        }
+
+                                                        if(msgSend==1){
+                                                                strcpy(tmpbuf2, tmpbuf);
+                                                                sprintf(tmpbuf2, "%s: %s",userid[i],tmpbuf);
+                                                                for(int j=3; j<=fdmax; j++) {
+                                                                        if(j==i) continue;
+                                                                        if(j == sockfd) continue;
+                                                                        if(!FD_ISSET(j, &master)) continue;
+                                                                        if(j!=i) {
+                                                                                if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                                                        }
+                                                                        if(send(j, tmpbuf2, strlen(tmpbuf2), 0)==-1) perror ("send");
+                                                                }
+                                                                for(int j=3; j<=fdmax; j++) {
+                                                                        if(j == sockfd) continue;
+                                                                        if(!FD_ISSET(j, &master)) continue;
+                                                                        if(j!=i) {
+                                                                                if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                                                        }
+                                                                        if(send(j, buf, strlen(buf), 0)==-1) perror ("send");
+                                                                }
+
+                                                                         sprintf(monsterStats,"/monsterdata\nName:%s:\nLevel:%i:\nHealth:%i:\nMage:%i:\nAttack:%i:\nMagic:%i:\nSkill:%i:\nDefense:%i:\nMagic defense:%i:\nStrengths:%i:\nWeakness:%i:\nExp:%i:\n/end\n",monsterName,monsterLevel,monsterHealth,monsterMage,monsterAttack,monsterMagic,monsterSkill,monsterDefense,monsterMdefense,monsterStrength,monsterWeakness,monsterExp);
+                                                                        for(int j=3; j<=fdmax; j++) {
+                                                                        if(j == sockfd) continue;
+                                                                        if(!FD_ISSET(j, &master)) continue;
+                                                                        if(j!=i) {
+                                                                                if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                                                        }
+                                                                        if(send(j, monsterStats, strlen(monsterStats), 0)==-1) perror ("send");
+                                                                        }
+                                                                sprintf(heroStats,"/herodata\nuser:%i:\nHero:%s:\nLevel:%i:\nMaxHp:%i:\ncurrentHp:%i:\nMaxMana:%i:\ncurrentMana:%i:,Attack:%i:\nMagic:%i:\nSkill:%i:\nDefense:%i:\nMdefense:%i:\nExp:%i:\n",i, heroes[i].name,heroes[i].level,heroes[i].maxHealth,heroes[i].currentHealth,heroes[i].maxMana,heroes[i].currentMana,heroes[i].attack,heroes[i].magic,heroes[i].skill,heroes[i].defense,heroes[i].mdefense,heroes[i].exp);
+                                                                for(int j=3; j<=fdmax; j++) {
+                                                                     if(j == sockfd) continue;
+                                                                     if(!FD_ISSET(j, &master)) continue;
+                                                                     if(j!=i) {
+                                                                         if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                                                     }
+                                                                   if(send(j, heroStats, strlen(heroStats), 0)==-1) perror ("send");
+                                                                }
+
+
+                                                        }
+                                                        else{
+                                                                for(int j=3; j<=fdmax; j++) {
+                                                                        if(j==i) continue;
+                                                                        if(j == sockfd) continue;
+                                                                        if(!FD_ISSET(j, &master)) continue;
+                                                                        if(j!=i) {
+                                                                                if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                                                        }
+                                                                        if(send(j, buf, strlen(buf), 0)==-1) perror ("send");
+                                                                }
+                                                        }
+                                                        combatEnded=1;
+                                                        for(int k=0;k<(usernum-1);k++){
+                                                                if(userturn[k+5]==0){
+                                                                        combatEnded=0;
+                                                                }
+                                                        }
+                                                        if(combatEnded==1){
+
+                                                                battlemode=3;
+                                                        }
+
+
+                                                }
+                                        }
+                                }
+                        }
+                }
+
+                if(battlemode==3){
+                        isHeal=0;
+                        rH=((rand()%(usernum-1))+5);
+                        while(userdead[rH]==1){
+                        rH=((rand()%(usernum-1))+5);
+                        }
+                        if(monsterSkill==1 && monsterMage==1){
+                                randomMove=rand()%52;
+                        }
+                        else if(monsterSkill==1){
+                                randomMove=rand()%26;}
+                        else if(monsterMage==1){
+                                randomMove=((rand()%29)+23);
+                        }
+                        else{
+                                randomMove=23;
+                        }
+                        switch(randomMove){
+                        case  0: case 1: case 2:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Sword Attack");
+                                break;
+                                }
+                        case  3: case 4: case 5:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Axe Attack");
+                                break;
+                                }
+                        case  6: case 7: case 8:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Spear Attack");
+                                break;
+                                }
+                        case 9: case 10:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Fire Sword");
+                                break;
+                                }
+                        case 11: case 12:{
+                                damageDealt=damageCalc((heroes[rH].defense/4),heroes[rH].mdefense,monsterAttack,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Pierce");
+                                break;
+                                }
+                        case 13: case 14:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack*2,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Thrust");
+                                break;
+                                }
+                        case 15: case 16:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Thunder Axe");
+                                break;
+                                }
+                        case 17: case 18:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Ice Spear");
+                                break;
+                                }
+                        case 19:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack*3,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Zansetsuken");
+                                break;
+                                }
+                        case 20:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack*3,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"X Strike");
+                                break;
+                                }
+                        case 21:{
+                                damageDealt=damageCalc((heroes[rH].defense/2),heroes[rH].mdefense,monsterAttack*2,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Cyclone");
+                                break;
+                                }
+                        case 22:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack*2,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Jump");
+                                break;
+                                }
+                        case 23: case 24: case 25:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack/2,monsterMagic,0,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Attack");
+                                break;
+                                }
+                        case 26: case 27: case 28:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Fire");
+                                break;
+                                }
+                        case 29: case 30: case 31:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Thunder");
+                                break;
+                                }
+                        case 32: case 33: case 34:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Blizzard");
+                                break;
+                                }
+                        case 35: case 36: case 37:{
+                                damageDealt=damageCalc(1,1,monsterAttack,monsterMagic,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Cure");
+                                isHeal=1;
+                                break;
+                                }
+                        case 38: case 39:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic*2,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Fira");
+                                break;
+                                }
+                        case 40: case 41:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic*2,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Thundara");
+                                break;
+                                }
+                        case 42: case 43:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic*2,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Blizzara");
+                                break;
+                                }
+                        case 44: case 45:{
+                                damageDealt=damageCalc(1,1,monsterAttack,monsterMagic*2,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Cura");
+                                isHeal=1;
+                                break;
+                                }
+                        case 46:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic*3,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Flare");
+                                break;
+                                }
+                        case 47:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic*3,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Luminaire");
+                                break;
+                                }
+                        case 48:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic*3,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Maelstrom");
+                                break;
+                                }
+                        case 49:{
+                                damageDealt=damageCalc(1,1,monsterAttack,monsterMagic*3,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Curaja");
+                                isHeal=1;
+                                break;
+                                }
+                        case 50:{
+                                damageDealt=damageCalc(heroes[rH].defense,(heroes[rH].mdefense/2),monsterAttack,monsterMagic*3,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Meteor");
+                                break;
+                                }
+                        case 51:{
+                                damageDealt=damageCalc(heroes[rH].defense,heroes[rH].mdefense,monsterAttack,monsterMagic*5,1,0,0,0,monsterLevel);
+                                strcpy(abilityName,"Ultima");
+                                break;
+                                }
+
+                        }
+                        if(isHeal==0){
+                                if(heroes[rH].currentHealth>damageDealt){
+                                        heroes[rH].currentHealth=heroes[rH].currentHealth-damageDealt;
+                                        sprintf(buf,"%s used %s and dealt %i damage to %s\n",monsterName,abilityName,damageDealt,heroes[rH].name);
+                                }
+                                else {
+                                        heroes[rH].currentHealth=0;
+                                        userturn[rH]=1;
+                                        userdead[rH]=1;
+                                        sprintf(buf,"%s used %s to defeat %s\n",monsterName,abilityName,heroes[rH].name);
+                                }
+                        }
+                        else{
+                                monsterHealth=monsterHealth+damageDealt;
+                                sprintf(buf,"%s used %s to cure itself for %i health\n",monsterName,abilityName,damageDealt);
+                                }
+                         sprintf(monsterStats,"/enemyturn\n/monsterdata\nName:%s:\nLevel:%i:\nHealth:%i:\nMage:%i:\nAttack:%i:\nMagic:%i:\nSkill:%i:\nDefense:%i:\nMagic defense:%i:\nStrengths:%i:\nWeakness:%i:\nExp:%i:\n/end\n",monsterName,monsterLevel,monsterHealth,monsterMage,monsterAttack,monsterMagic,monsterSkill,monsterDefense,monsterMdefense,monsterStrength,monsterWeakness,monsterExp);
+                                                               for(int j=3; j<=fdmax; j++) {
+                                                                    if(j == sockfd) continue;
+                                                                    if(!FD_ISSET(j, &master)) continue;
+                                                                    //if(j!=i) {
+                                                                    //    if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                                                    //}
+                                                                    if(send(j, monsterStats, strlen(monsterStats), 0)==-1) perror ("send");
+
+                        }
+                        for(int j=3; j<=fdmax; j++) {
+                                if(j == sockfd) continue;
+                                if(!FD_ISSET(j, &master)) continue;
+                                //if(j!=i) {
+                                //        if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                //}
+                                if(send(j, buf, strlen(buf), 0)==-1) perror ("send");
+                        }
+                        sprintf(heroStats,"/herodata\nuser:%i:\nHero:%s:\nLevel:%i:\nMaxHp:%i:\ncurrentHp:%i:\nMaxMana:%i:\ncurrentMana:%i:,Attack:%i:\nMagic:%i:\nSkill:%i:\nDefense:%i:\nMdefense:%i:\nExp:%i:\n",rH, heroes[rH].name,heroes[rH].level,heroes[rH].maxHealth,heroes[rH].currentHealth,heroes[rH].maxMana,heroes[rH].currentMana,heroes[rH].attack,heroes[rH].magic,heroes[rH].skill,heroes[rH].defense,heroes[rH].mdefense,heroes[rH].exp);
+                        for(int j=3; j<=fdmax; j++) {
+                            if(j == sockfd) continue;
+                            if(!FD_ISSET(j, &master)) continue;
+                            //if(j!=i) {
+                            //    if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                            //}
+                           if(send(j, heroStats, strlen(heroStats), 0)==-1) perror ("send");
+                        }
+
+                        printf("Enemy Turn");
+                        battlemode=2;
+                        for(int k=0;k<(usernum-1);k++){
+                                if(userdead[k+5]==0){
+                                        userturn[k+5]=0;
+                                }
+                        }
+                        int
+                        allDead=1;
+                        for(int k=0; k<(usernum-1);k++){
+                                if(userdead[k+5]==0){
+                                        allDead=0;
+                                }
+                        }
+                        if(allDead==1){
+                                sprintf(buf, "/endbattle\nThe party has been defeated!\n/end\n");
+                                for(int j=3; j<=fdmax; j++) {
+                                    if(j == sockfd) continue;
+                                    if(!FD_ISSET(j, &master)) continue;
+                                    //if(j!=i) {
+                                    //    if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                    //}
+                                    if(send(j, buf, strlen(buf), 0)==-1) perror ("send");
+                                }
+                                battlemode=0;
+                                for(int k=0; k<(usernum-1);k++){
+                                        heroes[k+5].currentHealth=heroes[k+5].maxHealth;
+                                        heroes[k+5].currentMana=heroes[k+5].maxMana;
+                                        userturn[k+5]=0;
+                                        userdead[k+5]=0;
+                                sprintf(heroStats,"/herodata\nuser:%i:\nHero:%s:\nLevel:%i:\nMaxHp:%i:\ncurrentHp:%i:\nMaxMana:%i:\ncurrentMana:%i:,Attack:%i:\nMagic:%i:\nSkill:%i:\nDefense:%i:\nMdefense:%i:\nExp:%i:\n",k+5, heroes[k+5].name,heroes[k+5].level,heroes[k+5].maxHealth,heroes[k+5].currentHealth,heroes[k+5].maxMana,heroes[k+5].currentMana,heroes[k+5].attack,heroes[k+5].magic,heroes[k+5].skill,heroes[k+5].defense,heroes[k+5].mdefense,heroes[k+5].exp);
+                                for(int j=3; j<=fdmax; j++) {
+                                        if(j == sockfd) continue;
+                                        if(!FD_ISSET(j, &master)) continue;
+                                        //if(j!=i) {
+                                        //    if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                        //}
+                                        if(send(j, heroStats, strlen(heroStats), 0)==-1) perror ("send");
+                                }
+                                }
+                        }
+                        combatEnded=0;
+
+                }
+                else if (battlemode==4){
+                        for(int k=0; k<(usernum-1);k++){
+                                userturn[k+5]=0;
+                                userdead[k+5]=0;
+                                if((heroes[k+5].exp+(monsterExp*monsterLevel))>(110*heroes[k+5].level)){
+                                        heroes[k+5].level=heroes[k+5].level+((heroes[k+5].exp+monsterExp*monsterLevel)/(110*heroes[k+5].level));
+                                        heroes[k+5].exp=0;
+                                        heroes[k+5].maxHealth=50+ ((40+heroesBaseHealth[k+5])*heroes[k+5].level*heroes[k+5].level)/60;
+                                        heroes[k+5].maxMana= 10+((heroesBaseMana[k+5]*heroes[k+5].level)/5);
+                                        sprintf(buf,"%s gained %i EXP points and Leveled up!\n",heroes[k+5].name,(monsterExp*monsterLevel));
+                                        sprintf(reqString,"update cosmonauts set level=%i where name=\"%s\"",heroes[k+5].level,heroes[k+5].name);
+                                        strcpy(query_string,reqString);
+                                        res=mysql_perform_query(conn,query_string);
+
+                                }
+                                else{
+                                        heroes[k+5].exp=heroes[k+5].exp+(monsterExp*monsterLevel);
+                                        sprintf(buf,"%s gained %i EXP points!\n",heroes[k+5].name,(monsterExp*monsterLevel));
+
+                                }
+                                sprintf(reqString,"update cosmonauts set exp=%i where name=\"%s\"",heroes[k+5].exp,heroes[k+5].name);
+                                strcpy(query_string,reqString);
+                                res=mysql_perform_query(conn,query_string);
+
+                                heroes[k+5].currentHealth=heroes[k+5].maxHealth;
+                                heroes[k+5].currentMana=heroes[k+5].maxMana;
+                                for(int j=3; j<=fdmax; j++) {
+                                    if(j == sockfd) continue;
+                                    if(!FD_ISSET(j, &master)) continue;
+                                    //if(j!=i) {
+                                    //    if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                    //}
+                                    if(send(j, buf, strlen(buf), 0)==-1) perror ("send");
+                                }
+                                sprintf(heroStats,"/herodata\nuser:%i:\nHero:%s:\nLevel:%i:\nMaxHp:%i:\ncurrentHp:%i:\nMaxMana:%i:\ncurrentMana:%i:,Attack:%i:\nMagic:%i:\nSkill:%i:\nDefense:%i:\nMdefense:%i:\nExp:%i:\n",k+5, heroes[k+5].name,heroes[k+5].level,heroes[k+5].maxHealth,heroes[k+5].currentHealth,heroes[k+5].maxMana,heroes[k+5].currentMana,heroes[k+5].attack,heroes[k+5].magic,heroes[k+5].skill,heroes[k+5].defense,heroes[k+5].mdefense,heroes[k+5].exp);
+                                for(int j=3; j<=fdmax; j++) {
+                                        if(j == sockfd) continue;
+                                        if(!FD_ISSET(j, &master)) continue;
+                                        //if(j!=i) {
+                                        //    if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                        //}
+                                        if(send(j, heroStats, strlen(heroStats), 0)==-1) perror ("send");
+                                }
+
+                        }
+                        sprintf(buf,"/endbattleEnemy Defeated/end");
+                        for(int j=3; j<=fdmax; j++) {
+                                    if(j == sockfd) continue;
+                                    if(!FD_ISSET(j, &master)) continue;
+                                    //if(j!=i) {
+                                    //    if(send(j, "\n", 1, 0) ==-1 ) perror ("send");
+                                    //}
+                                    if(send(j, buf, strlen(buf), 0)==-1) perror ("send");
+                                }
+
+                        battlemode=0;
+                }
+        }
+        mysql_free_result(res);
+        mysql_close(conn);
+        return 0;
+}

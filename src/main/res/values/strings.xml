@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Final Fantasy Chat</string>
+
+    <string name="hello_world">Final Fantasy Chat</string>
+    <string name="str_button">Send</string>
+    <string name="action_settings">Settings</string>
+    <string name="title_activity_battle">Battle</string>
+    <string name="title_activity_change_hero">ChangeHero</string>
+    <string name="title_activity_hero_stats">HeroStats</string>
+    <string name="title_activity_select_area">SelectArea</string>
+    <string name="title_activity_monster_stats">MonsterStats</string>
+    <string name="Magiclist">Name: Mana Required\nfire: 8\nblizzard: 8\nthunder: 8\ncure: 10\nfira: 22\nblizzaga: 22\nthundaga: 22\nice weapon: 17\ncura: 22\nflare: 40\nmaelstrom: 40\nluminaire: 40\ncuraga: 40\nmeteor: 45\nultima: 50</string>
+    <string name="Skilllist">Name: Skill Required\nattack: 0\naxe: 10\nsword: 10\nspear: 10\npierce: 12\nthrust: 12\nfire weapon: 17\nice weapon: 17\nthunder weapon: 17\nfire weapon: 17\ncyclone weapon: 20\njump weapon: 22\nxstrike weapon: 25\nzansetsuken: 30\n</string> />
+
+</resources>
